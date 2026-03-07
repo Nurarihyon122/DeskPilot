@@ -71,53 +71,37 @@ class PlannerOutput:
 
 class PlanNextAction(dspy.Signature):
     """
-    Decide the next sequence of actions to achieve the goal using accessibility-first principles.
-    
+    Plan the next action sequence to achieve the goal using accessibility-first principles.
+
     STANDARD SKILLS:
-    - Open App: PRESS_KEY("ESCAPE"); WAIT(0.5); PRESS_KEY("Alt+F2"); WAIT(1.5); TYPE("<bin_name>"); PRESS_KEY("ENTER") (CRITICAL: Look up exact <bin_name> in 'app_knowledge'!)
-    - File Path Navigation: PRESS_KEY("Ctrl+L"); WAIT(1); TYPE("<path>"); PRESS_KEY("ENTER"); WAIT(1) (MANDATORY for finding files. Use 'desktop_path' from state for Desktop, or the exact path the user specified.)
-    - File/Save Dialogs: PRESS_KEY("Ctrl+S"); WAIT(1); TYPE("filename"); PRESS_KEY("ENTER") (CRITICAL: Always WAIT after Ctrl+S/Ctrl+O)
-    
-    **CRITICAL TASK PARSING**:
-    When goal has multiple parts like "go to X and search for Y":
-    - Step 1: Navigate to X (success_indicators: EMPTY)
-    - Step 2: Search for Y on X (success_indicators: "Y, search results")
-    - "search [site]" = BROWSER_NAVIGATE([site].com), NOT searching for site name in Google
-    
-    BROWSER CDP ACTIONS (when is_browser=True and interactive_elements provided):
-    - BROWSER_NAVIGATE(url) - Navigate directly to URL
-    - BROWSER_CLICK(index) - Click element at index (e.g., BROWSER_CLICK(3) clicks [3])
-    - BROWSER_TYPE(index, text) - Type into element at index (does NOT auto-submit)
-    
-    DO NOT use CSS selectors. ONLY use index numbers from interactive_elements list.
-    
-    GUIDELINES:
-    1. Output a SEMICOLON-SEPARATED sequence of actions to save LLM calls.
-    2. **SEQUENCE LENGTH POLICY**: Keep sequences short (MAX 5-8 actions). Do NOT try to complete complex tasks in one sequence. It is better to finish a sub-goal, verify, and then plan the next step.
-    3. **AUTOCOMPLETE/DROPDOWN POLICY**: Elements marked [SEARCH_INPUT] or [DROPDOWN_OPTION] indicate an autocomplete flow.
-       - STEP A: When you see [SEARCH_INPUT], type into it: output ONLY BROWSER_TYPE(index, text). STOP. No more actions.
-       - STEP B: After typing, the next observation will show [DROPDOWN_OPTION] items. BROWSER_CLICK the one whose text best matches your search.
-       - NEVER type AND click in the same sequence for autocomplete inputs. Element indices CHANGE after typing.
-       - Example flow: Step 1: BROWSER_TYPE(5, "Tokyo") → Step 2: BROWSER_CLICK(8) where [8] is the [DROPDOWN_OPTION] for "Tokyo, Japan".
-    4. **POPUP/MODAL HANDLING**: If you see elements with text like "Close", "Dismiss", "Accept", "×", or buttons that appear to be popup closers (usually at high indices, overlaying content), dismiss them FIRST before continuing. Try PRESS_KEY(ESCAPE) as safest option, or BROWSER_CLICK on close button index. Do NOT try to interact with content behind popups - close them first.
-    5. **BROWSER PRIORITY**: When is_browser=True and interactive_elements are provided, ALWAYS use index-based BROWSER_* actions (BROWSER_NAVIGATE, BROWSER_CLICK(index), BROWSER_TYPE(index, text)). Never use TYPE or PRESS_KEY for web interactions - they are unreliable in browsers. Only use indices from the interactive_elements list.
-    6. If the goal is reached, use the DONE action.
-    7. **ANTI-LOOP POLICY**: If history shows REPEATED FAILURES (same action failing 2+ times), you are STUCK. Use recovery:
-       - Browser stuck? Use BROWSER_NAVIGATE to go back to the target site
-       - Wrong page? Check current_url and navigate directly: BROWSER_NAVIGATE(correctsite.com)
-       - Can't find element? Scroll to reveal more elements (SCROLL) or escalate: needs_vision=True
-       DO NOT repeat the same failing action more than twice.
-    8. GOAL DECOMPOSITION: Break down the main goal into 3-5 sub_goals. Each sub_goal must be a specific, verifiable state (e.g. 'Firefox Opened', 'Search results loaded', 'article page active').
-    9. **CRITICAL COMPLETION POLICY**: ONLY set 'success_indicators' when the FINAL step that completes the ENTIRE goal is being executed.
-       - Opening apps, navigating to sites → success_indicators: "" (ALWAYS EMPTY for intermediate steps)
-       - Only the LAST action that fulfills the goal → success_indicators: "expected content keywords"
-       - Multi-part goals: Each sub-goal except the final one has EMPTY success_indicators
-    10. WEB BEHAVIOR: Search results are INTERMEDIATE. If the user asks for 'info' or 'scrape', you MUST navigate into a specific website. Do NOT use DONE on a Google/Bing/Search result page. Use Vision fallback if you need to click a specific link.
-    11. **SOFT ANCHORS**: Use GENERIC 'expected_window_title' like 'Google Chrome' NOT specific sites like 'Amazon.com' - page titles are dynamic and will cause false mismatches.
-    12. **DIALOG TIMING**: Transition windows like "Save As" or "Open File" appear slowly. Always include a WAIT(1) after the trigger key (Ctrl+S, Ctrl+O) and before typing the filename.
-    13. **ABSOLUTE PATHS**: In Thunar, ALWAYS use File Path Navigation (Ctrl+L) to go to specific folders. Do NOT rely on clicking folders in the view as they might be hidden. The Desktop is at 'desktop_path' (from state). For terminal commands targeting the Desktop, use the 'desktop_path' value directly. Never assume a fixed path — always use what is provided in state.
-    14. **LAUNCHER RECOVERY**: If the window title is "app" or "application finder" after you sent ENTER, the launcher is stuck on top. Use PRESS_KEY("ESCAPE") and WAIT(1) to clear it. Do NOT try to use Alt+F2 again in the same sequence. Stop after ESCAPE so you can see if the target app was actually launched behind it.
-    15. **BINARY NAMES**: ALWAYS look up the application in `app_knowledge`. Use the exact `bin` name provided (e.g., if knowledge says 'terminal' -> 'bin: xfce4-terminal', you MUST type 'xfce4-terminal'). NEVER guess.
+    - Open App: PRESS_KEY("ESCAPE"); WAIT(0.5); PRESS_KEY("Alt+F2"); WAIT(1.5); TYPE("<bin_name>"); PRESS_KEY("ENTER")
+      → bin_name MUST come from `app_knowledge`. Never guess.
+    - Path Nav (Thunar): PRESS_KEY("Ctrl+L"); WAIT(1); TYPE("<absolute_path>"); PRESS_KEY("ENTER"); WAIT(1)
+      → ALWAYS default to `/app` (the DeskPilot project folder) for all file operations unless `/root` is explicitly requested.
+    - Save/Open Dialog: PRESS_KEY("Ctrl+S"); WAIT(1); TYPE("<filename>"); PRESS_KEY("ENTER")
+      → Always WAIT(1) after Ctrl+S/Ctrl+O before typing.
+
+    BROWSER ACTIONS (when is_browser=True):
+    Use ONLY index-based actions from interactive_elements. Never use CSS selectors or TYPE/PRESS_KEY for web.
+    - BROWSER_NAVIGATE(url) | BROWSER_CLICK(index) | BROWSER_TYPE(index, text)
+
+    RULES:
+    1. Sequences: Max 5-8 actions. Complete a sub-goal, verify, then plan next.
+    2. Autocomplete/Dropdown: BROWSER_TYPE → STOP → observe → BROWSER_CLICK dropdown option.
+       Never type AND click in same sequence. Indices change after typing.
+    3. Popups/Modals: Dismiss FIRST (PRESS_KEY("ESCAPE") or BROWSER_CLICK close). Never interact behind popups.
+    4. Success indicators: EMPTY for intermediate steps. Only set on the FINAL action completing the ENTIRE goal.
+    5. Anti-loop: Same action failing 2× = stuck. Recovery: BROWSER_NAVIGATE to target, or escalate needs_vision=True.
+    6. Goal decomposition: Break into 3–5 verifiable sub_goals (e.g. 'App opened', 'Page loaded').
+    7. Multi-part goals ("go to X and search Y"): Step 1 navigates (success_indicators: ""), Step 2 searches.
+       "search [site]" = BROWSER_NAVIGATE([site].com), NOT a Google search for the site name.
+    8. Web behavior: Search results are intermediate. Navigate INTO a specific page before DONE.
+    9. NEVER CHAIN BROWSER ACTIONS: You MUST output ONLY ONE browser action per sequence. Do NOT use semicolons to chain `BROWSER_TYPE`, `BROWSER_CLICK`, or `BROWSER_NAVIGATE` together. For example, if you want to type and click search, DO NOT chain them. Output ONLY `BROWSER_TYPE(...)` and stop. Let the engine observe, then output `BROWSER_CLICK(...)` on the next step.
+    10. Window titles: Use generic titles (e.g. "Google Chrome"), not dynamic page titles.
+    11. Launcher stuck ("app"/"application finder" in title): PRESS_KEY("ESCAPE"); WAIT(1). Stop — check if app launched behind it.
+    12. Thunar navigation: Always use Ctrl+L path navigation. Never click folders directly.
+    13. DONE: Only when the entire goal is complete. Use DONE("Goal reached") to end the task.
+    14. You MUST provide at least one valid action in `action_sequence`. Never leave it empty. If finished, output DONE("Finished").
     """
     
     # Inputs
@@ -135,7 +119,7 @@ class PlanNextAction(dspy.Signature):
     desktop_path: str = dspy.InputField(desc="Actual Desktop directory path (e.g. /root/Desktop). ALWAYS use this when the goal refers to the Desktop.")
     
     # Outputs
-    action_sequence: str = dspy.OutputField(desc="Semicolon-separated actions. Use BROWSER_NAVIGATE to go to websites when is_browser=True.")
+    action_sequence: str = dspy.OutputField(desc="Semicolon-separated actions. BROWSER_NAVIGATE for websites. MUST NOT BE EMPTY.")
     expected_window_title: str = dspy.OutputField(desc="**SOFT ANCHOR**: Generic title like 'Google Chrome', never specific page names.")
     success_indicators: str = dspy.OutputField(desc="**CRITICAL**: Comma-separated strings visible ONLY when ENTIRE goal complete. EMPTY for intermediate steps.")
     sub_goals: str = dspy.OutputField(desc="Comma-separated sub-tasks (e.g., 'Navigate to site, Search for query, View results')")
